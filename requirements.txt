@@ -1,4 +1,5 @@
 numpy
 torchvision
+time
 
 # pip install -r requirements.txt

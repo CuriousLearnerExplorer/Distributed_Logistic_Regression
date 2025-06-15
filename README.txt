@@ -17,3 +17,9 @@ Here we consider two possible system topology:
    node_i communicates their estimates to the centre, which processes 
    it (formally while handling the l1-regularization) and then 
    communicates a consensus solution uniformly back.
+
+For now we prefer the second structure, as although we need to introduce 
+one more node for the centre, the individual node_i-updates can be 
+implemented in parallel.
+
+Model:

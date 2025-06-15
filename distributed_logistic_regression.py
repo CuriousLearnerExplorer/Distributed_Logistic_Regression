@@ -4,6 +4,26 @@ import numpy as np
 # https://docs.pytorch.org/tutorials/beginner/blitz/cifar10_tutorial.html
 from torchvision import datasets
 
+# from multiprocessing import Pool, cpu_count # for multiprocessing
+import time # to measure duration of code
+
+# Predict 0/1 for a given model parameter w, as done in classification through logistic regression
+def predict(w, features):
+    """
+    w: parameter vector of logistic classifier
+    features: the features of the data
+    """
+
+    # vectorized evaluation of model at features
+    t = sigmoid_vec(features @ w)
+
+    # prediction is 1 if our model gives > 0.5
+    t[t > 0.5] = 1
+    # else it is 0
+    t[t <= 0.5] = 0
+
+    return t
+
 # Objective and augmented Lagrangian
 # Define logistic function
 def sigmoid(x):
@@ -102,6 +122,87 @@ def setup_distributed_system(n_nodes, n_samples, features, labels, estimate, mu_
         pool.append(Node(features[indices], labels[indices], estimate, mu_0, estimate.copy(), estimate.copy(), estimate.copy(), beta, lamb, estimate.copy()))
     # Return node pool
     return pool
+
+# Proximal Operator LASSO-regularization thorugh l1 (soft-thresholding)
+def prox_l1(iterate, param):
+    """
+    iterate: value at which we want to evaluate the proximal operator
+    param: hyperparameter of soft-thresholding
+    """
+
+    # replace negative values in max in formula of proximal operator
+    modified = np.abs(iterate) - param
+    modified[modified < 0] = 0
+
+    # formula for proximal operator of l1
+    optimum = modified * np.sign(iterate)
+    return optimum
+
+# One step of ADMM in star graph
+# TO-DO: Create parallelized version
+def distributed_optimizer_step_star(pool, n_iter_grad, beta, lamb):
+    """
+    pool: Pool of nodes with corresponding data
+    n_iter_grad: number of iterations of gradient descent
+    beta: hyperparameter of augmented Lagrangian
+    lamb: hyperparameter of l1-regularization
+    """
+    results = []
+    multipliers = []
+    # For the z update, see Boyd's manuscript on ADMM, page 52
+    dim = pool[0].get_estimate().shape[0]
+    avg_x = np.zeros(dim)
+    avg_mu = np.zeros(dim)
+    for i in range(0, len(pool)):
+        # optimize locally
+        results.append(pool[i].optimize(n_iter_grad))
+        multipliers.append(pool[i].get_mu())
+
+        avg_x += results[i] / n_nodes
+        avg_mu += multipliers[i] / n_nodes
+
+
+    intermediate = avg_x + avg_mu / beta
+    # update centre variable that means l1(centre) + quadratic penalties    
+    centre = prox_l1(intermediate , lamb/(n_nodes * beta))
+    
+    # Communicate centre to each node
+    for i in range(0, len(pool)):
+        # optimize locally
+        pool[i].update_centre(centre)
+
+# One step of ADMM in cyclic graph
+def distributed_optimizer_step_cyclic(pool, n_iter_grad):
+    """
+    pool: Pool of nodes with corresponding data
+    n_iter_grad: number of iterations of gradient descent
+    """
+    for i in range(0, len(pool)):
+        # optimize locally
+        result = pool[i].optimize(n_iter_grad)
+        # communicate result and multiplier part to previous node
+        pool[(i-1) % len(pool)].update_next(result)
+        pool[(i-1) % len(pool)].update_next_mu(pool[i].get_mu())
+        # communicate result to next node
+        pool[(i+1) % len(pool)].update_prev(result)
+
+# Coordinate whole ADMM
+def distributed_optimizer(pool, n_iter, n_iter_grad, beta, lamb):
+    """
+    pool: Pool of nodes with corresponding data
+    n_iter: Number of iterations of outer loop of ADMM
+    n_iter_grad: Number of iterations for GD in subproblems
+    beta: hyperparameter of augmented Lagrangian
+    lamb: hyperparameter of l1-regularization
+    """
+
+    # To-DO: Allow to choose topology easier, see also at bottom of code
+    for iter in range(n_iter):
+        # cyclic topology
+        # distributed_optimizer_step_cyclic(pool, n_iter_grad)
+
+        # star topology
+        distributed_optimizer_step_star(pool, n_iter_grad, beta, lamb)
 
 # To-DO: depending on graph topology, only take necessary attributes for that
 class Node:
@@ -318,3 +419,43 @@ if __name__ == '__main__':
     beta = 5
     lamb = 10
     pool = setup_distributed_system(n_nodes, n_samples, features_train, labels_train, w.copy(), mu_0.copy(), beta, lamb)
+
+    # Starting loss and gradient norm
+    print(f"Starting loss: {loss(w, features_train, labels_train) + lamb * np.linalg.norm(w,1)}")
+    print(np.linalg.norm(pool[0].loss_gradient()))
+
+    # Now optimization process
+
+    # Number of iterations of outer loop of ADMM
+    n_iter = 500
+    # Number of iterations for GD in subproblems
+    n_iter_grad = 50
+
+    # measure time to train model
+    start_time = time.time()
+
+    # update
+    distributed_optimizer(pool, n_iter, n_iter_grad, beta, lamb)
+
+    # stop time to train model
+    end_time = time.time()
+
+    # Take estimate of the last node
+    w_guess = pool[-1].get_estimate()
+
+    # get predictions of the trained model
+    prediction_train = predict(w_guess, features_train)
+    prediction_test = predict(w_guess, features_test)
+    
+    # training accuracy, i.e. correctly specifies samples
+    accuracy_train = 1 - np.sum(np.abs(labels_train - prediction_train)) / n_samples
+    accuracy_test = 1 - np.sum(np.abs(labels_test - prediction_test)) / len(indices_test)
+
+    # Summary statistics
+    
+    print(f"Training took {end_time - start_time} seconds.")
+    print(f"End loss: {loss(w_guess, features_train, labels_train) + lamb * np.linalg.norm(w_guess,1)}")
+    print(np.linalg.norm(pool[0].loss_gradient()))
+    print()
+    print(f"Accuracy in {n_samples} training samples: {accuracy_train}")
+    print(f"Accuracy in {len(indices_test)} test samples: {accuracy_test}")
