@@ -10,7 +10,11 @@ The algorithm we use for this is ADMM, which allows the decoupling by
 introducing auxiliary equality constraints and minimizing the
 augmented Lagrangian blockwise.
 
-Here we consider two possible system topology:
+Originally I did this in Matlab, but changed the code to fit into
+Python, as I wanted to get more practise in some important frameworks 
+like numpy in Python.
+
+Here we consider two possible system topologies:
 1. A cyclic structure: node_1 -> node_2 -> ... -> node_n -> node_1
 2. A star structure: node_i -> centre for all i, where centre is a 
    special node; communication is allowed in the following sense: Each 
